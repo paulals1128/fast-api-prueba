@@ -1,26 +1,34 @@
 from fastapi import FastAPI, HTTPException
-import json
 from pydantic import BaseModel
+import os
+
+import psycopg
+from dotenv import load_dotenv
+from psycopg.rows import dict_row
+from fastapi.middleware.cors import CORSMiddleware
+
+load_dotenv()
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if DATABASE_URL is None:
+    raise RuntimeError("Falta DATABASE_URL en el archivo .env")
+
+
+def conectar():
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 app = FastAPI()
-
-ARCHIVO = "albums.json"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class Album(BaseModel):
     titulo: str
     artista: str
     anio: int
-
-
-def leer():
-    with open(ARCHIVO, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def guardar(albums):
-    with open(ARCHIVO, "w", encoding="utf-8") as f:
-        json.dump(albums, f, indent=2, ensure_ascii=False)
-
 
 @app.get("/")
 def inicio():
@@ -28,50 +36,44 @@ def inicio():
 
 @app.get("/albums")
 def listar():
-    return leer()
+    with conectar() as conn:
+        return conn.execute("SELECT * FROM albums ORDER BY id").fetchall()
 
 @app.get("/albums/{id}")
 def buscar(id: int):
-    for album in leer():
-        if album["id"] == id:
-            return album
-    raise HTTPException(status_code=404, detail="Ese álbum no existe")
+    with conectar() as conn:
+        album = conn.execute(
+            "SELECT * FROM albums WHERE id = %s", (id,)
+        ).fetchone()
+    if album is None:
+        raise HTTPException(status_code=404, detail="Ese álbum no existe")
+    return album
 
 @app.post("/albums")
 def agregar(album: Album):
-    albums = leer()
-    id_mas_alto = 0
-    for a in albums:
-        if a["id"] > id_mas_alto:
-            id_mas_alto = a["id"]
-    nuevo = {
-        "id": id_mas_alto + 1,
-        "titulo": album.titulo,
-        "artista": album.artista,
-        "anio": album.anio,
-    }
-    albums.append(nuevo)
-    guardar(albums)
-    return nuevo
+   with conectar() as conn:
+        return conn.execute(
+            "INSERT INTO albums (titulo, artista, anio) VALUES (%s, %s, %s) RETURNING *",
+            (album.titulo, album.artista, album.anio),
+        ).fetchone()
 
 @app.put("/albums/{id}")
 def editar(id: int, datos: Album):
-    albums = leer()
-    for album in albums:
-        if album["id"] == id:
-            album["titulo"] = datos.titulo
-            album["artista"] = datos.artista
-            album["anio"] = datos.anio
-            guardar(albums)
-            return album
-    raise HTTPException(status_code=404, detail="Ese álbum no existe")
+    with conectar() as conn:
+        album = conn.execute(
+            "UPDATE albums SET titulo = %s, artista = %s, anio = %s WHERE id = %s RETURNING *",
+            (datos.titulo, datos.artista, datos.anio, id),
+        ).fetchone()
+    if album is None:
+        raise HTTPException(status_code=404, detail="Ese álbum no existe")
+    return album
 
 @app.delete("/albums/{id}")
 def borrar(id: int):
-    albums = leer()
-    for album in albums:
-        if album["id"] == id:
-            albums.remove(album)
-            guardar(albums)
-            return {"mensaje": "Álbum borrado"}
-    raise HTTPException(status_code=404, detail="Ese álbum no existe")
+    with conectar() as conn:
+        borrado = conn.execute(
+            "DELETE FROM albums WHERE id = %s RETURNING id", (id,)
+        ).fetchone()
+    if borrado is None:
+        raise HTTPException(status_code=404, detail="Ese álbum no existe")
+    return {"mensaje": "Álbum borrado"}
